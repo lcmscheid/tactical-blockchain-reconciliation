@@ -55,3 +55,18 @@ The system supports three configurable strategies:
 * **Priority-Authority:** Favors higher command levels (Chain of Command focus).
 * **Temporal-Priority:** Favors urgency and recent timestamps.
 * **Hybrid:** A weighted approach combining all context factors.
+
+## 📂 Project Structure
+The project follows the standard Go project layout to ensure modularity and separation of concerns:
+```text
+tactical-blockchain-reconciliation/
+├── cmd/
+│   └── simulator/        # Main entry point for the simulation
+├── internal/
+│   ├── core/             # Core domain types (Block, Transaction, Enums)
+│   ├── crypto/           # Cryptographic helpers (SHA-256 hashing)
+│   ├── network/          # Node topology and partition simulation engine
+│   └── reconciler/       # Consensus and conflict resolution logic
+├── go.mod                # Go module definition
+└── README.md             # Project documentation
+```
