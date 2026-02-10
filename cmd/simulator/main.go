@@ -25,6 +25,8 @@ func main() {
 	runScenarioPriorityAuthority()
 	fmt.Println("")
 	runScenarioTemporalPriority()
+	fmt.Println("")
+	runScenarioTemporalTieBreaker()
 }
 
 // ============================================================================
@@ -126,6 +128,63 @@ func runScenarioTemporalPriority() {
 	engine := reconciler.NewReconciler(strategy)
 
 	mergedTxs, _ := engine.MergeChains(nodePDU1.LocalChain, nodePDU2.LocalChain)
+
+	// 4. Report
+	printResultTable(mergedTxs)
+}
+
+// ============================================================================
+// SCENARIO 3: TEMPORAL TIE-BREAKER (Auditability Check)
+// Description: Two units of SAME RANK emit orders of SAME PRIORITY.
+// Challenge: The system must order them chronologically (Time A < Time B).
+// ============================================================================
+func runScenarioTemporalTieBreaker() {
+	fmt.Println(">>> SCENARIO 3: Temporal Tie-Breaker (Same Rank/Priority)")
+	fmt.Println("    [Testing if Engine respects chronological order for semantic ties]")
+
+	// 1. Setup Network
+	genesis := core.NewGenesisBlock()
+	// Two nodes of equal Authority (PDU)
+	nodeAlpha := network.NewNode("PDU-ALPHA", core.AuthPDU, genesis)
+	nodeBravo := network.NewNode("PDU-BRAVO", core.AuthPDU, genesis)
+
+	// 2. Simulate Fork
+	// We simulate that Alpha acted BEFORE Bravo.
+	baseTime := time.Now().Unix()
+
+	// Tx 1: Occurred at T+0s
+	txEarly := core.Transaction{
+		ID:             "TX-EARLY (Alpha)",
+		Timestamp:      baseTime, // EARLIER
+		CommandContent: "Initial Spot Report",
+		SignerID:       nodeAlpha.ID,
+		Authority:      core.AuthPDU,      // Same Authority
+		Priority:       core.PriorityHigh, // Same Priority
+	}
+
+	// Tx 2: Occurred at T+5s
+	txLate := core.Transaction{
+		ID:             "TX-LATE (Bravo)",
+		Timestamp:      baseTime + 5, // LATER
+		CommandContent: "Confirmation Update",
+		SignerID:       nodeBravo.ID,
+		Authority:      core.AuthPDU,      // Same Authority
+		Priority:       core.PriorityHigh, // Same Priority
+	}
+
+	// Mine separate blocks (Fork)
+	nodeAlpha.MineBlock([]core.Transaction{txEarly})
+	nodeBravo.MineBlock([]core.Transaction{txLate})
+
+	fmt.Printf(" [1] Fork Created: TX-EARLY (Time: %d) vs TX-LATE (Time: %d)\n", txEarly.Timestamp, txLate.Timestamp)
+
+	// 3. Reconciliation
+	// We use the Priority-Authority strategy (which calculates identical scores for both)
+	strategy := reconciler.StrategyPriorityAuthority{}
+	engine := reconciler.NewReconciler(strategy)
+
+	fmt.Println(" [2] Reconciling...")
+	mergedTxs, _ := engine.MergeChains(nodeAlpha.LocalChain, nodeBravo.LocalChain)
 
 	// 4. Report
 	printResultTable(mergedTxs)
