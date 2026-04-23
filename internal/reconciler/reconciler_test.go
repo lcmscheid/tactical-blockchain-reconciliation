@@ -261,3 +261,213 @@ func TestStrategyHybrid_CustomWeights_PriorityDominant(t *testing.T) {
 		t.Fatalf("Hybrid with priority-dominant weights: expected DU first, got %s", merged[0].ID)
 	}
 }
+
+func TestSort_FullTie_BreaksByTxID(t *testing.T) {
+	// Identical score, timestamp, and signer: only the transaction id can decide.
+	r := NewReconciler(StrategyPriorityAuthority{})
+	common := core.Transaction{
+		Timestamp: 500, SignerID: "PDU-ALPHA",
+		Authority: core.AuthPDU, Priority: core.PriorityHigh,
+	}
+	txFirst := common
+	txFirst.ID = "TX-AAAA"
+	txSecond := common
+	txSecond.ID = "TX-ZZZZ"
+
+	chainA := []*core.Block{{Transactions: []core.Transaction{txSecond}}}
+	chainB := []*core.Block{{Transactions: []core.Transaction{txFirst}}}
+	merged, _ := r.MergeChains(chainA, chainB)
+
+	if merged[0].ID != "TX-AAAA" || merged[1].ID != "TX-ZZZZ" {
+		t.Fatalf("Four-key sort failed on full tie: got %s, %s", merged[0].ID, merged[1].ID)
+	}
+}
+
+// ---------- Dependency tests (Dimension 4) ----------
+
+func TestDeps_BasicOrdering(t *testing.T) {
+	// TX-A (JFC, score 1001) depends on TX-B (DU, score 14).
+	// Without deps TX-A would be first; with deps TX-B must come first.
+	r := NewReconciler(StrategyPriorityAuthority{})
+
+	txA := core.Transaction{
+		ID: "TX-A", Authority: core.AuthJFC, Priority: core.PriorityLow,
+		Dependencies: []string{"TX-B"},
+	}
+	txB := core.Transaction{
+		ID: "TX-B", Authority: core.AuthDU, Priority: core.PriorityCritical,
+	}
+
+	chainA := []*core.Block{{Transactions: []core.Transaction{txA}}}
+	chainB := []*core.Block{{Transactions: []core.Transaction{txB}}}
+	merged, _ := r.MergeChains(chainA, chainB)
+
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 transactions, got %d", len(merged))
+	}
+	if merged[0].ID != "TX-B" {
+		t.Errorf("dependency ordering failed: expected TX-B first (dependency), got %s", merged[0].ID)
+	}
+	if merged[1].ID != "TX-A" {
+		t.Errorf("dependency ordering failed: expected TX-A second (dependent), got %s", merged[1].ID)
+	}
+}
+
+func TestDeps_ChainOfThree(t *testing.T) {
+	// TX-C depends on TX-B, TX-B depends on TX-A. All have descending scores.
+	r := NewReconciler(StrategyPriorityAuthority{})
+
+	txA := core.Transaction{ID: "TX-A", Authority: core.AuthDU, Priority: core.PriorityLow}
+	txB := core.Transaction{
+		ID: "TX-B", Authority: core.AuthPDU, Priority: core.PriorityMedium,
+		Dependencies: []string{"TX-A"},
+	}
+	txC := core.Transaction{
+		ID: "TX-C", Authority: core.AuthJFC, Priority: core.PriorityCritical,
+		Dependencies: []string{"TX-B"},
+	}
+
+	chain := []*core.Block{{Transactions: []core.Transaction{txC, txB, txA}}}
+	chainEmpty := []*core.Block{{Transactions: []core.Transaction{}}}
+	merged, _ := r.MergeChains(chain, chainEmpty)
+
+	if len(merged) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(merged))
+	}
+	if merged[0].ID != "TX-A" || merged[1].ID != "TX-B" || merged[2].ID != "TX-C" {
+		t.Errorf("chain ordering failed: got %s -> %s -> %s, want TX-A -> TX-B -> TX-C",
+			merged[0].ID, merged[1].ID, merged[2].ID)
+	}
+}
+
+func TestDeps_IndependentGroups(t *testing.T) {
+	// Two independent dependency chains. Within each chain, order by deps.
+	// Between chains, the higher-scored chain's root goes first.
+	r := NewReconciler(StrategyPriorityAuthority{})
+
+	// Chain 1: JFC -> PDU (JFC depends on PDU)
+	tx1Root := core.Transaction{ID: "TX-PDU-ROOT", Authority: core.AuthPDU, Priority: core.PriorityHigh}
+	tx1Dep := core.Transaction{
+		ID: "TX-JFC-DEP", Authority: core.AuthJFC, Priority: core.PriorityLow,
+		Dependencies: []string{"TX-PDU-ROOT"},
+	}
+
+	// Chain 2: independent DU transaction (no deps, score 14)
+	tx2 := core.Transaction{ID: "TX-DU-INDEP", Authority: core.AuthDU, Priority: core.PriorityCritical}
+
+	chain := []*core.Block{{Transactions: []core.Transaction{tx1Dep, tx1Root, tx2}}}
+	chainEmpty := []*core.Block{{Transactions: []core.Transaction{}}}
+	merged, _ := r.MergeChains(chain, chainEmpty)
+
+	if len(merged) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(merged))
+	}
+
+	// TX-PDU-ROOT (score 103) must come before TX-JFC-DEP (score 1001) due to dep.
+	// TX-DU-INDEP (score 14) has no deps so it's sorted by score among zero-in-degree txs.
+	// Zero-in-degree set: TX-PDU-ROOT (103) and TX-DU-INDEP (14).
+	// TX-PDU-ROOT emitted first (higher score), then TX-JFC-DEP (dep satisfied), then TX-DU-INDEP.
+	// Wait — after TX-PDU-ROOT is emitted, TX-JFC-DEP becomes zero-in-degree (score 1001)
+	// and TX-DU-INDEP is already zero (score 14). So TX-JFC-DEP goes next.
+	if merged[0].ID != "TX-PDU-ROOT" {
+		t.Errorf("expected TX-PDU-ROOT first, got %s", merged[0].ID)
+	}
+	if merged[1].ID != "TX-JFC-DEP" {
+		t.Errorf("expected TX-JFC-DEP second (dep satisfied), got %s", merged[1].ID)
+	}
+	if merged[2].ID != "TX-DU-INDEP" {
+		t.Errorf("expected TX-DU-INDEP third, got %s", merged[2].ID)
+	}
+}
+
+func TestDeps_MissingDep(t *testing.T) {
+	// TX-A depends on "TX-COMMITTED" which is not in the merge set.
+	// The dependency should be treated as satisfied (already in common prefix).
+	r := NewReconciler(StrategyPriorityAuthority{})
+
+	txA := core.Transaction{
+		ID: "TX-A", Authority: core.AuthJFC, Priority: core.PriorityLow,
+		Dependencies: []string{"TX-COMMITTED"},
+	}
+	txB := core.Transaction{
+		ID: "TX-B", Authority: core.AuthDU, Priority: core.PriorityCritical,
+	}
+
+	chainA := []*core.Block{{Transactions: []core.Transaction{txA}}}
+	chainB := []*core.Block{{Transactions: []core.Transaction{txB}}}
+	merged, _ := r.MergeChains(chainA, chainB)
+
+	// TX-A (score 1001) should be first since its dep is outside the merge set.
+	if merged[0].ID != "TX-A" {
+		t.Errorf("missing dep should be treated as satisfied: expected TX-A first, got %s", merged[0].ID)
+	}
+}
+
+func TestDeps_CycleDetection(t *testing.T) {
+	// TX-A depends on TX-B, TX-B depends on TX-A — a cycle.
+	// Both should still appear in output (appended by score), not lost.
+	r := NewReconciler(StrategyPriorityAuthority{})
+
+	txA := core.Transaction{
+		ID: "TX-A", Authority: core.AuthJFC, Priority: core.PriorityLow,
+		Dependencies: []string{"TX-B"},
+	}
+	txB := core.Transaction{
+		ID: "TX-B", Authority: core.AuthDU, Priority: core.PriorityCritical,
+		Dependencies: []string{"TX-A"},
+	}
+
+	chainA := []*core.Block{{Transactions: []core.Transaction{txA}}}
+	chainB := []*core.Block{{Transactions: []core.Transaction{txB}}}
+	merged, _ := r.MergeChains(chainA, chainB)
+
+	if len(merged) != 2 {
+		t.Fatalf("cycle should not lose transactions: expected 2, got %d", len(merged))
+	}
+	// Both are in a cycle, so they're appended by score. TX-A (JFC, 1001) > TX-B (DU, 14).
+	if merged[0].ID != "TX-A" {
+		t.Errorf("cycle fallback: expected TX-A first (higher score), got %s", merged[0].ID)
+	}
+}
+
+func TestDeps_NoDeps_BackwardCompat(t *testing.T) {
+	// Re-run the original Priority-Authority test to confirm backward compatibility.
+	r := NewReconciler(StrategyPriorityAuthority{})
+
+	txA := core.Transaction{ID: "TX-DU", Authority: core.AuthDU, Priority: core.PriorityCritical}
+	txB := core.Transaction{ID: "TX-JFC", Authority: core.AuthJFC, Priority: core.PriorityLow}
+
+	blockA, _ := core.NewBlock(1, []core.Transaction{txA}, "genesis_hash", "ValidatorA")
+	blockB, _ := core.NewBlock(1, []core.Transaction{txB}, "genesis_hash", "ValidatorB")
+
+	merged, _ := r.MergeChains([]*core.Block{blockA}, []*core.Block{blockB})
+
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 transactions, got %d", len(merged))
+	}
+	if merged[0].ID != "TX-JFC" {
+		t.Errorf("backward compat failed: expected TX-JFC first, got %s", merged[0].ID)
+	}
+}
+
+func TestDeps_SelfDependency_Ignored(t *testing.T) {
+	// A transaction that depends on itself should not deadlock.
+	r := NewReconciler(StrategyPriorityAuthority{})
+
+	txA := core.Transaction{
+		ID: "TX-A", Authority: core.AuthJFC, Priority: core.PriorityLow,
+		Dependencies: []string{"TX-A"},
+	}
+	txB := core.Transaction{ID: "TX-B", Authority: core.AuthDU, Priority: core.PriorityCritical}
+
+	chainA := []*core.Block{{Transactions: []core.Transaction{txA}}}
+	chainB := []*core.Block{{Transactions: []core.Transaction{txB}}}
+	merged, _ := r.MergeChains(chainA, chainB)
+
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 transactions, got %d", len(merged))
+	}
+	if merged[0].ID != "TX-A" {
+		t.Errorf("self-dep should be ignored: expected TX-A first (score 1001), got %s", merged[0].ID)
+	}
+}
