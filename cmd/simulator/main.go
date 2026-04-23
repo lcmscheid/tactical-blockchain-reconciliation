@@ -27,6 +27,59 @@ func main() {
 	runScenarioTemporalPriority()
 	fmt.Println("")
 	runScenarioTemporalTieBreaker()
+	fmt.Println("")
+	runScenarioHybrid()
+}
+
+// ============================================================================
+// SCENARIO 4: HYBRID STRATEGY (Authority + Priority, normalized linear blend)
+// Description: A PDU-Critical transaction meets a JFC-Low one; under the
+// default 0.6/0.4 Hybrid weights both score 70, so the four-key sort falls
+// back to the timestamp, then to the signer id.
+// ============================================================================
+func runScenarioHybrid() {
+	fmt.Println(">>> SCENARIO 4: Hybrid Blend (Strategy: Hybrid, default 0.6/0.4)")
+
+	genesis := core.NewGenesisBlock()
+	nc := network.NewNetworkController()
+
+	nodeJFC := network.NewNode("NODE-JFC-1", core.AuthJFC, genesis)
+	nodePDU := network.NewNode("NODE-PDU-ALPHA", core.AuthPDU, genesis)
+	nc.AddNode(nodeJFC)
+	nc.AddNode(nodePDU)
+
+	fmt.Println(" [1] Network Partition Active: JFC isolated from PDU.")
+	nc.CreatePartition([]string{nodeJFC.ID})
+
+	baseTime := time.Now().Unix()
+
+	txPDU := core.Transaction{
+		ID:             "TX-PDU-CRIT",
+		Timestamp:      baseTime,
+		CommandContent: "Local Contact Report (Critical)",
+		SignerID:       nodePDU.ID,
+		Authority:      core.AuthPDU,
+		Priority:       core.PriorityCritical,
+	}
+	txJFC := core.Transaction{
+		ID:             "TX-JFC-LOW",
+		Timestamp:      baseTime + 5,
+		CommandContent: "Routine Logistical Directive",
+		SignerID:       nodeJFC.ID,
+		Authority:      core.AuthJFC,
+		Priority:       core.PriorityLow,
+	}
+
+	nodePDU.MineBlock([]core.Transaction{txPDU})
+	nodeJFC.MineBlock([]core.Transaction{txJFC})
+
+	fmt.Println(" [2] Blocks Mined in Isolation (Fork Created).")
+	fmt.Println(" [3] Network Healed. Initiating Reconciliation under Hybrid policy...")
+
+	engine := reconciler.NewReconciler(reconciler.NewStrategyHybrid())
+	mergedTxs, _ := engine.MergeChains(nodeJFC.LocalChain, nodePDU.LocalChain)
+
+	printResultTable(mergedTxs)
 }
 
 // ============================================================================

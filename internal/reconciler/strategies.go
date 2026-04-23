@@ -80,3 +80,57 @@ func (s StrategyTemporalAuthority) CalculateScore(tx core.Transaction) float64 {
 
 	return score
 }
+
+// StrategyHybrid combines authority and priority linearly after normalizing both
+// to the interval [0, 100]. The default weights (0.6 for authority, 0.4 for
+// priority) reflect the compromise documented in the thesis and can be
+// overridden per configuration to match a different doctrinal profile.
+//
+// Normalization tables:
+//
+//	Authority: JFC=100, PDU=50, DU=10
+//	Priority : Critical=100, High=75, Medium=50, Low=25
+//
+// With default weights a PDU signing a Critical transaction ties a JFC
+// signing a Low transaction at score 70, a property that the draft cites to
+// illustrate the intermediate behaviour of the hybrid policy.
+type StrategyHybrid struct {
+	WeightAuthority float64
+	WeightPriority  float64
+}
+
+// NewStrategyHybrid returns a StrategyHybrid pre-configured with the default
+// 0.6 / 0.4 weights.
+func NewStrategyHybrid() StrategyHybrid {
+	return StrategyHybrid{WeightAuthority: 0.6, WeightPriority: 0.4}
+}
+
+func (s StrategyHybrid) Name() string {
+	return "Hybrid"
+}
+
+func (s StrategyHybrid) CalculateScore(tx core.Transaction) float64 {
+	var auth float64
+	switch tx.Authority {
+	case core.AuthJFC:
+		auth = 100.0
+	case core.AuthPDU:
+		auth = 50.0
+	case core.AuthDU:
+		auth = 10.0
+	}
+
+	var pri float64
+	switch tx.Priority {
+	case core.PriorityCritical:
+		pri = 100.0
+	case core.PriorityHigh:
+		pri = 75.0
+	case core.PriorityMedium:
+		pri = 50.0
+	case core.PriorityLow:
+		pri = 25.0
+	}
+
+	return s.WeightAuthority*auth + s.WeightPriority*pri
+}

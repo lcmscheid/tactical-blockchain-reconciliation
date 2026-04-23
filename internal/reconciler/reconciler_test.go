@@ -179,3 +179,85 @@ func TestMergeChains_TemporalTieBreaker(t *testing.T) {
 			txLate.ID, mergedTxs[1].ID)
 	}
 }
+
+func TestStrategyHybrid_DefaultWeights_ScoresMatchTable(t *testing.T) {
+	s := NewStrategyHybrid()
+
+	cases := []struct {
+		name string
+		tx   core.Transaction
+		want float64
+	}{
+		{"JFC-Critical", core.Transaction{Authority: core.AuthJFC, Priority: core.PriorityCritical}, 100},
+		{"JFC-Low", core.Transaction{Authority: core.AuthJFC, Priority: core.PriorityLow}, 70},
+		{"PDU-Critical", core.Transaction{Authority: core.AuthPDU, Priority: core.PriorityCritical}, 70},
+		{"PDU-Medium", core.Transaction{Authority: core.AuthPDU, Priority: core.PriorityMedium}, 50},
+		{"DU-Critical", core.Transaction{Authority: core.AuthDU, Priority: core.PriorityCritical}, 46},
+		{"DU-Low", core.Transaction{Authority: core.AuthDU, Priority: core.PriorityLow}, 16},
+	}
+	for _, tc := range cases {
+		got := s.CalculateScore(tc.tx)
+		if got != tc.want {
+			t.Errorf("%s: got %.4f, want %.4f", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestStrategyHybrid_JFCOutranksDUOnTie(t *testing.T) {
+	// JFC+Medium = 0.6*100 + 0.4*50 = 80; DU+Critical = 0.6*10 + 0.4*100 = 46.
+	// Hybrid must place the JFC tx first despite the DU tx being Critical.
+	r := NewReconciler(NewStrategyHybrid())
+	txJFC := core.Transaction{ID: "TX-JFC", Authority: core.AuthJFC, Priority: core.PriorityMedium}
+	txDU := core.Transaction{ID: "TX-DU", Authority: core.AuthDU, Priority: core.PriorityCritical}
+
+	chainA := []*core.Block{{Transactions: []core.Transaction{txDU}}}
+	chainB := []*core.Block{{Transactions: []core.Transaction{txJFC}}}
+	merged, _ := r.MergeChains(chainA, chainB)
+
+	if merged[0].ID != "TX-JFC" {
+		t.Fatalf("Hybrid strategy: expected TX-JFC first, got %s", merged[0].ID)
+	}
+}
+
+func TestStrategyHybrid_PDUCriticalTiesJFCLow_BreaksByTimestamp(t *testing.T) {
+	// Both score 70 under the default weights, so the timestamp key decides.
+	r := NewReconciler(NewStrategyHybrid())
+	txEarly := core.Transaction{
+		ID: "TX-PDU-EARLY", Timestamp: 1000,
+		SignerID: "PDU-ALPHA", Authority: core.AuthPDU, Priority: core.PriorityCritical,
+	}
+	txLate := core.Transaction{
+		ID: "TX-JFC-LATE", Timestamp: 2000,
+		SignerID: "NODE-JFC-1", Authority: core.AuthJFC, Priority: core.PriorityLow,
+	}
+
+	chainA := []*core.Block{{Transactions: []core.Transaction{txLate}}}
+	chainB := []*core.Block{{Transactions: []core.Transaction{txEarly}}}
+	merged, _ := r.MergeChains(chainA, chainB)
+
+	if merged[0].ID != txEarly.ID {
+		t.Fatalf("Hybrid tie: expected earlier timestamp first, got %s", merged[0].ID)
+	}
+}
+
+func TestStrategyHybrid_CustomWeights_PriorityDominant(t *testing.T) {
+	// Invert the default compromise so priority dominates authority.
+	s := StrategyHybrid{WeightAuthority: 0.2, WeightPriority: 0.8}
+	r := NewReconciler(s)
+	txJFCLow := core.Transaction{
+		ID: "TX-JFC-LOW", SignerID: "JFC", Authority: core.AuthJFC, Priority: core.PriorityLow,
+	}
+	txDUCrit := core.Transaction{
+		ID: "TX-DU-CRIT", SignerID: "DU", Authority: core.AuthDU, Priority: core.PriorityCritical,
+	}
+
+	// With these weights JFC+Low = 0.2*100 + 0.8*25 = 40;
+	// DU+Critical = 0.2*10 + 0.8*100 = 82 — DU must win.
+	chainA := []*core.Block{{Transactions: []core.Transaction{txJFCLow}}}
+	chainB := []*core.Block{{Transactions: []core.Transaction{txDUCrit}}}
+	merged, _ := r.MergeChains(chainA, chainB)
+
+	if merged[0].ID != txDUCrit.ID {
+		t.Fatalf("Hybrid with priority-dominant weights: expected DU first, got %s", merged[0].ID)
+	}
+}
